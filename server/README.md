@@ -1,7 +1,9 @@
 Server side for LLM
 =====================
 
-## HOW TO RUN
+## VLLM
+
+### HOW TO RUN
 
 1. Install dependencies
 
@@ -34,7 +36,7 @@ curl http://localhost:8082/v1/chat/completions -H "Content-Type: application/jso
 }'
 ```
 
-## TROUBLESHOOTING GUIDE
+### TROUBLESHOOTING GUIDE
 
 1. `urllib3` and `OpenSSL`
 
@@ -48,3 +50,11 @@ pip install urllib3==1.26.6
 ```
 
 Ref:  [ImportError: urllib3 v2.0 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with LibreSSL 2.8.3](https://stackoverflow.com/questions/76187256/importerror-urllib3-v2-0-only-supports-openssl-1-1-1-currently-the-ssl-modu)
+
+## Streamlit
+
+### LAUNCH
+
+```shell
+streamlit run --server.address 0.0.0.0 --server.port 8081 ./streamlit_with_vllm.py 
+```
