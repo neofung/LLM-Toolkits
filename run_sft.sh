@@ -20,7 +20,7 @@ torchrun --nproc_per_node=$HOST_GPU_NUM \
     --template_name baichuan2 \
     --model_name_or_path /dockerdata/Baichuan2-13B-Chat  \
     --cache_dir /dockerdata/cache \
-    --train_file_dir ./data/supervised_fine_tuning \
+    --train_file_dir ./data/supervised_fine_tuning/alpaca-gpt4-data/data/ \
     --validation_split_percentage 5 \
     --drop_out_of_length_limit_sample True \
     --output_dir /dockerdata/sft_baichuan2-13b_${START_TIME}/rank-$INDEX \
