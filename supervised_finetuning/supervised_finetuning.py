@@ -40,9 +40,25 @@ from transformers.trainer_pt_utils import LabelSmoother
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from cluster.dist_coordinator import DistCoordinator
 
 index = int(os.environ["INDEX"]) or 0
+
+try:
+    from cluster.dist_coordinator import DistCoordinator
+
+    coordinator = DistCoordinator()
+except Exception as ex:
+    logger.warning(ex)
+
+
+    #     import torch.distributed as dist
+    class DistCoordinator(object):
+        def is_master(self):
+            return index == 0
+
+
+    coordinator = DistCoordinator()
+
 logger.add(f"./supervised_finetuning-{index}.log")
 
 # 修复多线程下 tiktoken 在datasets中的问题，https://github.com/huggingface/datasets/issues/5536#issuecomment-1682309347
@@ -554,6 +570,23 @@ register_conv_template(
     )
 )
 
+"""Yi template
+source: https://github.com/01-ai/Yi
+Supports: https://huggingface.co/01-ai/Yi-34B-Chat
+          https://huggingface.co/01-ai/Yi-6B-Chat
+"""
+register_conv_template(
+    Conversation(
+        name="yi",
+        system_prompt="",
+        messages=[],
+        roles=("user", "assistant"),
+        prompt="<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n",
+        sep="\n",
+        stop_str="<|im_end|>",
+    )
+)
+
 
 def get_conv_template(name: str) -> Conversation:
     """Get a conversation template."""
@@ -653,7 +686,7 @@ def load_tokenizer(tokenizer_class, data_args: DataTrainingArguments, model_args
         tokenizer_name_or_path = model_args.model_name_or_path
     tokenizer = tokenizer_class.from_pretrained(tokenizer_name_or_path, **tokenizer_kwargs)
     prompt_template = get_conv_template(data_args.template_name)
-    if tokenizer.eos_token_id is None:
+    if tokenizer.eos_token_id is None or prompt_template.name=="yi":
         tokenizer.eos_token = prompt_template.stop_str  # eos token is required for SFT
         logger.info("Add eos token: {}".format(tokenizer.eos_token))
     if tokenizer.pad_token_id is None:
@@ -759,7 +792,6 @@ def main():
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, PeftArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    coordinator = DistCoordinator()
     if coordinator.is_master():
         logger.info(f"Model args: {model_args}")
         logger.info(f"Data args: {data_args}")
@@ -927,8 +959,7 @@ def main():
             max_train_samples = len(train_dataset)
             if coordinator.is_master():
                 logger.debug(f"Num train_samples: {max_train_samples}")
-    #                 logger.debug("Tokenized training example:")
-    #                 logger.debug(f"Decode input_ids[0]: {tokenizer.decode(train_dataset[0]['input_ids'])}")
+                logger.debug(f"Tokenized training example: {tokenizer.decode(train_dataset[0]['input_ids'])}")
 
     #                 logger.debug(f"Decode labels[0]: {tokenizer.decode(replaced_labels)}")
 
@@ -967,8 +998,7 @@ def main():
             max_eval_samples = len(eval_dataset)
             if coordinator.is_master():
                 logger.debug(f"Num eval_samples: {max_eval_samples}")
-    #                 logger.debug("Tokenized eval example:")
-    #                 logger.debug(tokenizer.decode(eval_dataset[0]['input_ids']))
+                logger.debug(f"Tokenized eval example: {tokenizer.decode(eval_dataset[0]['input_ids'])}")
 
     # Load model
     if model_args.model_name_or_path:
