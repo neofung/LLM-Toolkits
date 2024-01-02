@@ -3,12 +3,11 @@
 
 
 import os
-from copy import deepcopy
+import sys
 from dataclasses import dataclass, field
 from glob import glob
 from typing import Dict, Optional
 
-import torch
 from datasets import load_dataset
 from loguru import logger
 from peft import LoraConfig, TaskType
@@ -27,8 +26,6 @@ from transformers import (
 )
 from transformers.deepspeed import is_deepspeed_zero3_enabled
 from trl import DPOTrainer
-
-import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -128,6 +125,7 @@ class ScriptArguments:
     max_source_length: Optional[int] = field(default=256, metadata={"help": "Max length of prompt input text"})
     max_target_length: Optional[int] = field(default=256, metadata={"help": "Max length of output text"})
     min_target_length: Optional[int] = field(default=4, metadata={"help": "Min length of output text"})
+    model_max_length: Optional[int] = field(default=None)
     max_train_samples: Optional[int] = field(
         default=None,
         metadata={
@@ -288,22 +286,26 @@ def return_prompt_and_responses(examples) -> Dict[str, str]:
       "Question: " + <prompt> + "\n\nAnswer: "
     """
 
+    for column in ["prompt", "chosen", "rejected"]:
+        examples[column] = [t.strip() for t in examples[column]]
+
     # baichuan-2 模板, 这里的 chosen 和 rejected不用包含 EOS token
-    return {
-        "prompt": ["<reserved_106>" + question + "<reserved_107>" for question in examples["prompt"]],
-        "chosen": examples["chosen"],
-        "rejected": examples["rejected"],
-    }
-
-    # Yi-34B-Chat 模板
-
-
 #     return {
 # #         "prompt": ["Question: " + question.replace("\\n", "\n") + "\n\nAnswer: " for question in examples["prompt"]],
 #         "prompt": ["<|im_start|>user\n" + question + "<|im_end|>\n<|im_start|>assistant\n" for question in examples["prompt"]],
 #         "chosen": examples["chosen"],
 #         "rejected": examples["rejected"],
 #     }
+
+    # Yi-34B-Chat 模板
+
+    return {
+        #         "prompt": ["Question: " + question.replace("\\n", "\n") + "\n\nAnswer: " for question in examples["prompt"]],
+        "prompt": ["<|im_start|>user\n" + question + "<|im_end|>\n<|im_start|>assistant\n" for question in
+                   examples["prompt"]],
+        "chosen": examples["chosen"],
+        "rejected": examples["rejected"],
+    }
 
 
 def plot_table(values):
@@ -318,7 +320,7 @@ def plot_table(values):
 def print_special_token(tokenizer, model):
     # print special token
     attrs = ["pad_token", "pad_token_id", "bos_token", "bos_token_id", "eos_token", "eos_token_id", "unk_token",
-             "unk_token_id", "model_max_length"]
+             "unk_token_id", "model_max_length", "max_position_embeddings"]
     tokenizer_attrs, model_attrs = list(), list()
     for attr in attrs:
         if hasattr(tokenizer, attr):
@@ -354,6 +356,8 @@ def main():
     if not tokenizer_name_or_path:
         tokenizer_name_or_path = args.model_name_or_path
     tokenizer = tokenizer_class.from_pretrained(tokenizer_name_or_path, **tokenizer_kwargs)
+    if args.model_max_length is not None:
+        tokenizer.model_max_length = args.model_max_length
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = 0  # set as the <unk> token
 
@@ -491,6 +495,12 @@ def main():
         torch_dtype=torch_dtype,
         cache_dir=args.cache_dir
     )
+
+    if args.model_max_length is not None:
+        if "max_position_embeddings" in config.__dict__:
+            config.max_position_embeddings = args.model_max_length
+
+    logger.info(config)
     if args.load_in_4bit or args.load_in_8bit:
         logger.info(f"Quantizing model, load_in_4bit: {args.load_in_4bit}, load_in_8bit: {args.load_in_8bit}")
     logger.info("Loading train model")
@@ -616,7 +626,7 @@ def main():
             logger.info("*** Train ***")
         train_result = trainer.train()
         metrics = train_result.metrics
-        metrics["train_samples"] = max_train_samples
+        metrics["train_samples"] = len(train_dataset)
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_state()
@@ -634,7 +644,7 @@ def main():
         if trainer.is_world_process_zero():
             logger.info("*** Evaluate ***")
         metrics = trainer.evaluate()
-        metrics["eval_samples"] = max_eval_samples
+        metrics["eval_samples"] = len(eval_dataset)
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
         if trainer.is_world_process_zero():

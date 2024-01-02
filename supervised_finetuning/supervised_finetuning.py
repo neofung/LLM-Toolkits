@@ -9,6 +9,7 @@ part of this code is adapted from https://github.com/shibing624/textgen
 """
 import math
 import os
+import sys
 from dataclasses import dataclass, field
 from glob import glob
 from typing import List, Optional, Dict, Sequence
@@ -34,10 +35,7 @@ from transformers import (
     DataCollatorForSeq2Seq,
 )
 from transformers.deepspeed import is_deepspeed_zero3_enabled
-from transformers.trainer import TRAINING_ARGS_NAME
 from transformers.trainer_pt_utils import LabelSmoother
-
-import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -845,10 +843,10 @@ def main():
                 conversations.append([
                     {
                         "from": "human",
-                        "value": f"{instru}\n\n{human}"
+                        "value": f"{instru}\n\n{human}".strip()
                     }, {
                         "from": "gpt",
-                        "value": f"{gpt}"
+                        "value": gpt.strip()
                     }
                 ])
 
