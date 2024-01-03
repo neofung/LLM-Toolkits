@@ -41,22 +41,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 index = int(os.environ["INDEX"]) or 0
 
-try:
-    from cluster.dist_coordinator import DistCoordinator
-
-    coordinator = DistCoordinator()
-except Exception as ex:
-    logger.warning(ex)
-
-
-    #     import torch.distributed as dist
-    class DistCoordinator(object):
-        def is_master(self):
-            return index == 0
-
-
-    coordinator = DistCoordinator()
-
 logger.add(f"./supervised_finetuning-{index}.log")
 
 # 修复多线程下 tiktoken 在datasets中的问题，https://github.com/huggingface/datasets/issues/5536#issuecomment-1682309347
@@ -669,7 +653,7 @@ def find_all_linear_names(peft_model, int4=False, int8=False):
     return sorted(lora_module_names)
 
 
-def load_tokenizer(tokenizer_class, data_args: DataTrainingArguments, model_args: ModelArguments):
+def load_tokenizer(tokenizer_class, data_args: DataTrainingArguments, model_args: ModelArguments, coordinator):
     # Load tokenizer
     tokenizer_kwargs = {
         "cache_dir": model_args.cache_dir,
@@ -686,7 +670,8 @@ def load_tokenizer(tokenizer_class, data_args: DataTrainingArguments, model_args
     prompt_template = get_conv_template(data_args.template_name)
     if tokenizer.eos_token_id is None or prompt_template.name=="yi":
         tokenizer.eos_token = prompt_template.stop_str  # eos token is required for SFT
-        logger.info("Add eos token: {}".format(tokenizer.eos_token))
+        if coordinator.is_master():
+            logger.info("Add eos token: {}".format(tokenizer.eos_token))
     if tokenizer.pad_token_id is None:
         if tokenizer.unk_token_id is not None:
             tokenizer.pad_token = tokenizer.unk_token
@@ -696,7 +681,7 @@ def load_tokenizer(tokenizer_class, data_args: DataTrainingArguments, model_args
     return tokenizer, prompt_template
 
 
-def load_raw_datasets(data_args: DataTrainingArguments, model_args: DataTrainingArguments, coordinator: DistCoordinator,
+def load_raw_datasets(data_args: DataTrainingArguments, model_args: DataTrainingArguments, coordinator,
                       seed=1024):
     # Get datasets
     if data_args.dataset_name is not None:
@@ -723,14 +708,14 @@ def load_raw_datasets(data_args: DataTrainingArguments, model_args: DataTraining
         # Loading a dataset from local files.
         data_files = {}
         if data_args.train_file_dir is not None and os.path.exists(data_args.train_file_dir):
-            train_data_files = glob(f'{data_args.train_file_dir}/**/*.json', recursive=True) + glob(
-                f'{data_args.train_file_dir}/**/*.jsonl', recursive=True)
+            train_data_files = glob(f'{data_args.train_file_dir}/**/train*.json', recursive=True) + glob(
+                f'{data_args.train_file_dir}/**/train*.jsonl', recursive=True)
             if coordinator.is_master():
                 logger.info(f"train files: {train_data_files}")
             data_files["train"] = train_data_files
         if data_args.validation_file_dir is not None and os.path.exists(data_args.validation_file_dir):
-            eval_data_files = glob(f'{data_args.validation_file_dir}/**/*.json', recursive=True) + glob(
-                f'{data_args.validation_file_dir}/**/*.jsonl', recursive=True)
+            eval_data_files = glob(f'{data_args.validation_file_dir}/**/validation*.json', recursive=True) + glob(
+                f'{data_args.validation_file_dir}/**/validation*.jsonl', recursive=True)
             if coordinator.is_master():
                 logger.info(f"eval files: {eval_data_files}")
             data_files["validation"] = eval_data_files
@@ -789,14 +774,31 @@ def print_special_token(tokenizer, model):
 def main():
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, PeftArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    
+    try:
+        from cluster.dist_coordinator import DistCoordinator
+
+        coordinator = DistCoordinator()
+    except Exception as ex:
+        logger.warning(ex)
+
+
+        #     import torch.distributed as dist
+        class DistCoordinator(object):
+            def is_master(self):
+                return index == 0
+
+
+        coordinator = DistCoordinator()
 
     if coordinator.is_master():
         logger.info(f"Model args: {model_args}")
         logger.info(f"Data args: {data_args}")
         logger.info(f"Training args: {training_args}")
         logger.info(
-            f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
-            + f" distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
+            f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}, "
+            + f" distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}, "
+            + f" is deepspeed zero3 enabled: {is_deepspeed_zero3_enabled()}"
         )
 
     # Set seed before initializing model.
@@ -806,7 +808,7 @@ def main():
         raise ValueError("Please specify a model_type, e.g. llama, chatglm, bloom, etc.")
     config_class, model_class, tokenizer_class = MODEL_CLASSES[model_args.model_type]
 
-    tokenizer, prompt_template = load_tokenizer(tokenizer_class, data_args, model_args)
+    tokenizer, prompt_template = load_tokenizer(tokenizer_class, data_args, model_args, coordinator)
     if coordinator.is_master():
         logger.debug(f"Tokenizer: {tokenizer}")
     IGNORE_INDEX = LabelSmoother.ignore_index if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
@@ -926,7 +928,6 @@ def main():
         if "train" not in raw_datasets:
             raise ValueError("--do_train requires a train dataset")
         train_dataset = raw_datasets['train']
-        max_train_samples = len(train_dataset)
         if data_args.max_train_samples is not None and data_args.max_train_samples > 0:
             max_train_samples = min(len(train_dataset), data_args.max_train_samples)
             train_dataset = train_dataset.select(range(max_train_samples))
@@ -968,7 +969,6 @@ def main():
             if "validation" not in raw_datasets:
                 raise ValueError("--do_eval requires a validation dataset")
             eval_dataset = raw_datasets["validation"]
-            max_eval_samples = len(eval_dataset)
             if data_args.max_eval_samples is not None and data_args.max_eval_samples > 0:
                 max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
                 eval_dataset = eval_dataset.select(range(max_eval_samples))
@@ -1023,7 +1023,7 @@ def main():
                 config=config,
                 load_in_8bit=model_args.load_in_8bit,
                 low_cpu_mem_usage=(not is_deepspeed_zero3_enabled()),
-                device_map=model_args.device_map,
+                device_map= None if is_deepspeed_zero3_enabled() else model_args.device_map,                
                 trust_remote_code=model_args.trust_remote_code,
                 quantization_config=BitsAndBytesConfig(
                     load_in_4bit=True,
@@ -1039,7 +1039,7 @@ def main():
                 config=config,
                 load_in_8bit=model_args.load_in_8bit,
                 low_cpu_mem_usage=(not is_deepspeed_zero3_enabled()),
-                device_map=model_args.device_map,
+                device_map=None if is_deepspeed_zero3_enabled() else model_args.device_map,                
                 trust_remote_code=model_args.trust_remote_code,
                 use_safetensors=False,
                 quantization_config=BitsAndBytesConfig(
@@ -1100,7 +1100,7 @@ def main():
             logger.info("Fine-tuning method: Full parameters training")
         model = model.float()
 
-    if coordinator.is_master():
+    if coordinator.is_master() and not is_deepspeed_zero3_enabled():
         print_trainable_parameters(model)
         logger.debug(f"Model: {model}")
 
