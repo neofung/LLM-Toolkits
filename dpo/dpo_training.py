@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from glob import glob
 from typing import Dict, Optional
 
+import torch
+from accelerate import Accelerator
 from datasets import load_dataset
 from loguru import logger
 from peft import LoraConfig, TaskType
@@ -24,12 +26,14 @@ from transformers import (
     TrainingArguments,
     BitsAndBytesConfig,
 )
-from transformers.deepspeed import is_deepspeed_zero3_enabled
+from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from trl import DPOTrainer
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import torch
+# index = int(os.environ["INDEX"]) or 0
+
+# logger.add(f"./dpo-{index}.log")
 
 # torch.distributed.init_process_group(backend="nccl")
 
@@ -341,7 +345,22 @@ def main():
     parser = HfArgumentParser(ScriptArguments)
     args = parser.parse_args_into_dataclasses()[0]
 
-    logger.info(f"Parse args: {args}")
+    try:
+        torch.distributed.init_process_group(backend="nccl")
+        from cluster.dist_coordinator import DistCoordinator
+        coordinator = DistCoordinator()
+    except Exception as ex:
+        logger.warning(ex)
+
+        #     import torch.distributed as dist
+        class DistCoordinator(object):
+            def is_master(self):
+                return args.local_rank in [0, -1]
+
+        coordinator = DistCoordinator()
+
+    if coordinator.is_master():
+        logger.info(f"Parse args: {args}")
 
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
     if args.model_type == 'bloom':
@@ -387,12 +406,14 @@ def main():
         if args.train_file_dir is not None and os.path.exists(args.train_file_dir):
             train_data_files = glob(f'{args.train_file_dir}/**/train*.json', recursive=True) + glob(
                 f'{args.train_file_dir}/**/train*.jsonl', recursive=True)
-            logger.info(f"train files: {', '.join(train_data_files)}")
+            if coordinator.is_master():
+                logger.info(f"train files: {', '.join(train_data_files)}")
             data_files["train"] = train_data_files
         if args.validation_file_dir is not None and os.path.exists(args.validation_file_dir):
             eval_data_files = glob(f'{args.validation_file_dir}/**/validation*.json', recursive=True) + glob(
                 f'{args.validation_file_dir}/**/validation*.jsonl', recursive=True)
-            logger.info(f"eval files: {', '.join(eval_data_files)}")
+            if coordinator.is_master():
+                logger.info(f"eval files: {', '.join(eval_data_files)}")
             data_files["validation"] = eval_data_files
         raw_datasets = load_dataset(
             'json',
@@ -413,7 +434,8 @@ def main():
                 split=f"train[{args.validation_split_percentage}%:]",
                 cache_dir=args.cache_dir,
             )
-    logger.info(f"Raw datasets: {raw_datasets}")
+    if coordinator.is_master():
+        logger.info(f"Raw datasets: {raw_datasets}")
 
     # Preprocessing the datasets
     max_source_length = args.max_source_length
@@ -431,7 +453,8 @@ def main():
         if args.max_train_samples is not None and args.max_train_samples > 0:
             max_train_samples = min(len(train_dataset), args.max_train_samples)
             train_dataset = train_dataset.select(range(max_train_samples))
-        logger.debug(f"Example train_dataset[0]: {train_dataset[0]}")
+        if coordinator.is_master():
+            logger.debug(f"Example train_dataset[0]: {train_dataset[0]}")
         tokenized_dataset = train_dataset.shuffle().map(
             return_prompt_and_responses,
             batched=True,
@@ -444,7 +467,8 @@ def main():
             lambda x: 0 < len(x['prompt'] + x['chosen']) <= full_max_length
                       and 0 < len(x['prompt'] + x['rejected']) <= full_max_length
         )
-        logger.debug(f"Num train_samples: {len(train_dataset)}. "
+        if coordinator.is_master():
+            logger.debug(f"Num train_samples: {len(train_dataset)}. "
                      + "First train example: "
                      + train_dataset[0]['prompt'] + train_dataset[0]['chosen'])
 
@@ -458,7 +482,8 @@ def main():
         if args.max_eval_samples is not None and args.max_eval_samples > 0:
             max_eval_samples = min(len(eval_dataset), args.max_eval_samples)
             eval_dataset = eval_dataset.select(range(max_eval_samples))
-        logger.debug(f"Example eval_dataset[0]: {eval_dataset[0]}")
+        if coordinator.is_master():
+            logger.debug(f"Example eval_dataset[0]: {eval_dataset[0]}")
         eval_dataset = eval_dataset.map(
             return_prompt_and_responses,
             batched=True,
@@ -471,7 +496,8 @@ def main():
             lambda x: 0 < len(x['prompt'] + x['chosen']) <= full_max_length
                       and 0 < len(x['prompt'] + x['rejected']) <= full_max_length
         )
-        logger.debug(f"Num eval_samples: {len(eval_dataset)}. "
+        if coordinator.is_master():
+            logger.debug(f"Num eval_samples: {len(eval_dataset)}. "
                      + "First eval example: "
                      + eval_dataset[0]['prompt'] + eval_dataset[0]['chosen'])
 
@@ -486,7 +512,8 @@ def main():
     if ddp:
         args.device_map = {"": int(os.environ.get("LOCAL_RANK", "0"))}
 
-    logger.info(f"Device map: {args.device_map}")
+    if coordinator.is_master():
+        logger.info(f"Device map: {args.device_map}")
     if args.qlora and is_deepspeed_zero3_enabled():
         logger.warning("ZeRO3 are both currently incompatible with QLoRA.")
     config = config_class.from_pretrained(
@@ -500,10 +527,12 @@ def main():
         if "max_position_embeddings" in config.__dict__:
             config.max_position_embeddings = args.model_max_length
 
-    logger.info(config)
+    if coordinator.is_master():
+        logger.info(config)
     if args.load_in_4bit or args.load_in_8bit:
         logger.info(f"Quantizing model, load_in_4bit: {args.load_in_4bit}, load_in_8bit: {args.load_in_8bit}")
-    logger.info("Loading train model")
+    if coordinator.is_master():
+        logger.info("Loading train model")
     model = model_class.from_pretrained(
         args.model_name_or_path,
         config=config,
@@ -513,7 +542,7 @@ def main():
         low_cpu_mem_usage=(not is_deepspeed_zero3_enabled()),
         device_map=args.device_map,
         trust_remote_code=args.trust_remote_code,
-        use_flash_attention_2=args.use_flash_attention_2,
+        attn_implementation="flash_attention_2" if args.use_flash_attention_2 else None,
         quantization_config=BitsAndBytesConfig(
             load_in_4bit=args.load_in_4bit,
             load_in_8bit=args.load_in_8bit,
@@ -526,7 +555,8 @@ def main():
     model.config.pad_token_id = model.config.eos_token_id
     model.config.use_cache = False
 
-    logger.info("Loading reference model")
+    if coordinator.is_master():
+        logger.info("Loading reference model")
     ref_model = model_class.from_pretrained(
         args.model_name_or_path,
         config=config,
@@ -536,7 +566,7 @@ def main():
         low_cpu_mem_usage=(not is_deepspeed_zero3_enabled()),
         device_map=args.device_map,
         trust_remote_code=args.trust_remote_code,
-        use_flash_attention_2=args.use_flash_attention_2,
+        attn_implementation="flash_attention_2" if args.use_flash_attention_2 else None,
         quantization_config=BitsAndBytesConfig(
             load_in_4bit=args.load_in_4bit,
             load_in_8bit=args.load_in_8bit,
@@ -578,7 +608,7 @@ def main():
         bf16=args.bf16,
         fp16=args.fp16,
         remove_unused_columns=args.remove_unused_columns,
-        deepspeed=args.deepspeed,
+        #         deepspeed=args.deepspeed,
         local_rank=args.local_rank,
         run_name=f"dpo_{args.model_type}",
     )
@@ -602,7 +632,8 @@ def main():
             lora_dropout=args.lora_dropout,
         )
     else:
-        logger.info("Fine-tuning method: Full parameters training")
+        if coordinator.is_master():
+            logger.info("Fine-tuning method: Full parameters training")
     trainer = DPOTrainer(
         model,
         ref_model=ref_model,
@@ -616,13 +647,16 @@ def main():
         max_length=full_max_length,
     )
 
-    if trainer.is_world_process_zero():
+    if is_deepspeed_zero3_enabled():
+        trainer.ref_model = Accelerator().prepare(trainer.ref_model)
+
+    if coordinator.is_master():
         print_special_token(trainer.tokenizer, trainer.model)
         print_trainable_parameters(trainer.model)
 
     # Training
     if args.do_train:
-        if trainer.is_world_process_zero():
+        if coordinator.is_master():
             logger.info("*** Train ***")
         train_result = trainer.train()
         metrics = train_result.metrics
@@ -630,7 +664,7 @@ def main():
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_state()
-        if trainer.is_world_process_zero():
+        if coordinator.is_master():
             logger.debug(f"Training metrics: {metrics}")
             logger.info(f"Saving model checkpoint to {args.output_dir}")
             trainer.save_model(args.output_dir)
@@ -641,13 +675,13 @@ def main():
 
             # Evaluation
     if args.do_eval:
-        if trainer.is_world_process_zero():
+        if coordinator.is_master():
             logger.info("*** Evaluate ***")
         metrics = trainer.evaluate()
         metrics["eval_samples"] = len(eval_dataset)
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
-        if trainer.is_world_process_zero():
+        if coordinator.is_master():
             logger.debug(f"Eval metrics: {metrics}")
 
 
