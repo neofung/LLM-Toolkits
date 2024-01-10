@@ -1,3 +1,9 @@
 [submodule "data/supervised_fine_tuning/alpaca-gpt4-data"]
 	path = data/supervised_fine_tuning/alpaca-gpt4-data
 	url = https://huggingface.co/datasets/c-s-ale/alpaca-gpt4-data
+[submodule "data/reward/MGSM8KInstruct_Cross"]
+	path = data/reward/MGSM8KInstruct_Cross
+	url = https://huggingface.co/datasets/Mathoctopus/MGSM8KInstruct_Cross
+[submodule "data/reward/MGSM8KInstruct_Parallel"]
+	path = data/reward/MGSM8KInstruct_Parallel
+	url = https://huggingface.co/datasets/Mathoctopus/GSM8KInstruct_Parallel
