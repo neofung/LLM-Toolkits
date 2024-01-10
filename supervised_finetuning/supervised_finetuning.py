@@ -14,8 +14,10 @@ from dataclasses import dataclass, field
 from glob import glob
 from typing import List, Optional, Dict, Sequence
 
+import deepspeed
 import torch
 from datasets import load_dataset
+from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from loguru import logger
 from peft import LoraConfig, TaskType, get_peft_model, PeftModel, prepare_model_for_int8_training
 from transformers import (
@@ -742,6 +744,42 @@ def load_raw_datasets(data_args: DataTrainingArguments, model_args: DataTraining
     return raw_datasets
 
 
+def _z3_params_to_fetch(param_list):
+    return [
+        p for p in param_list
+        if hasattr(p, 'ds_id') and p.ds_status == ZeroParamStatus.NOT_AVAILABLE
+    ]
+
+
+def save_zero_three_model(model_ema, global_rank, save_dir, zero_stage=0, sub_folder=""):
+    zero_stage_3 = (zero_stage == 3)
+    output_dir = os.path.join(save_dir, sub_folder)
+    os.makedirs(output_dir, exist_ok=True)
+    WEIGHTS_NAME = "pytorch_model.bin"
+    output_model_file = os.path.join(output_dir, WEIGHTS_NAME)
+
+    model_to_save = model_ema.module if hasattr(model_ema,
+                                                'module') else model_ema
+    if not zero_stage_3:
+        if global_rank == 0:
+            torch.save(model_to_save.state_dict(), output_model_file)
+    else:
+        output_state_dict = {}
+        for k, v in model_to_save.named_parameters():
+
+            if hasattr(v, 'ds_id'):
+                with deepspeed.zero.GatheredParameters(_z3_params_to_fetch([v
+                                                                            ]),
+                                                       enabled=zero_stage_3):
+                    v_p = v.data.clone().detach().cpu()  # this is a hack to get around the fact that we can't get the data from the param
+            else:
+                v_p = v.cpu()
+            if global_rank == 0 and "lora" not in k:
+                output_state_dict[k] = v_p
+        if global_rank == 0:
+            torch.save(output_state_dict, output_model_file)
+        del output_state_dict
+
 def plot_table(values):
     n_col = len(values[0])
     len_col = [max([len(str(row[i_col])) for row in values] + [6]) for i_col in range(n_col)]
@@ -777,12 +815,9 @@ def main():
     
     try:
         from cluster.dist_coordinator import DistCoordinator
-
         coordinator = DistCoordinator()
     except Exception as ex:
         logger.warning(ex)
-
-
         #     import torch.distributed as dist
         class DistCoordinator(object):
             def is_master(self):
@@ -1153,7 +1188,11 @@ def main():
         model.config.use_cache = True  # enable cache after training
         trainer.save_state()
         logger.info(f"Saving model checkpoint to {training_args.output_dir}")
-        save_model(training_args.output_dir, model, tokenizer, training_args)
+
+        if not is_deepspeed_zero3_enabled():
+            save_model(training_args.output_dir, model, tokenizer, training_args)
+        else:
+            save_zero_three_model(model, training_args.local_rank, training_args.output_dir, zero_stage=3)
 
     # Evaluation
     if training_args.do_eval:
