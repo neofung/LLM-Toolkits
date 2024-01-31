@@ -7,3 +7,6 @@
 [submodule "data/reward/MGSM8KInstruct_Parallel"]
 	path = data/reward/MGSM8KInstruct_Parallel
 	url = https://huggingface.co/datasets/Mathoctopus/GSM8KInstruct_Parallel
+[submodule "moe/mergekit"]
+	path = moe/mergekit
+	url = https://github.com/cg123/mergekit.git
