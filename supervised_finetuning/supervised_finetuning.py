@@ -10,6 +10,7 @@ part of this code is adapted from https://github.com/shibing624/textgen
 import math
 import os
 import sys
+import json
 from dataclasses import dataclass, field
 from glob import glob
 from typing import List, Optional, Dict, Sequence
@@ -866,7 +867,7 @@ def main():
         targets_list = []
         seq_length = []
         truncated_list = []
-        roles = ["human", "gpt"]
+        roles = ["human", "assistant"]
 
         ## 将基于 instruction, input, output 的数据转换为基于 conversations 格式
         if 'input' in examples and 'output' in examples:
@@ -876,14 +877,14 @@ def main():
 
             conversations = []
 
-            for instru, human, gpt in zip(instruction_list, input_list, output_list):
+            for instru, human, assistant in zip(instruction_list, input_list, output_list):
                 conversations.append([
                     {
                         "from": "human",
                         "value": f"{instru}\n\n{human}".strip()
                     }, {
-                        "from": "gpt",
-                        "value": gpt.strip()
+                        "from": "assistant",
+                        "value": assistant.strip()
                     }
                 ])
 
@@ -891,6 +892,8 @@ def main():
 
         def get_dialog(examples):
             for i, source in enumerate(examples['conversations']):
+                if isinstance(source, str):
+                    source = json.loads(source)
                 if len(source) < 2:
                     continue
                 data_role = source[0].get("from", "")
