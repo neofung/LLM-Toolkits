@@ -182,7 +182,7 @@ class DataTrainingArguments:
     overwrite_cache: bool = field(
         default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
     )
-    validation_split_percentage: Optional[int] = field(
+    validation_split_percentage: Optional[float] = field(
         default=1,
         metadata={
             "help": "The percentage of the train set used as validation set in case there's no validation split"
@@ -602,7 +602,9 @@ class SavePeftModelTrainer(Trainer):
         os.makedirs(output_dir, exist_ok=True)
         if self.args.local_rank in [-1, 0]:
             #             torch.save(self.args, os.path.join(output_dir, TRAINING_ARGS_NAME))
-            self.model.save_pretrained(output_dir)
+            self.model.save_pretrained(output_dir,
+                safe_serialization=False,  # don't save safetensors
+            )
 
 
 def save_model(output_dir, model, tokenizer, args):
@@ -612,7 +614,9 @@ def save_model(output_dir, model, tokenizer, args):
     # Take care of distributed/parallel training
     model_to_save = model.module if hasattr(model, "module") else model
     if args.local_rank in [-1, 0]:
-        model_to_save.save_pretrained(output_dir)
+        model_to_save.save_pretrained(output_dir, 
+            safe_serialization=False,  # don't save safetensors
+        )
         tokenizer.save_pretrained(output_dir)
 
 
@@ -849,9 +853,7 @@ def main():
         logger.debug(f"Tokenizer: {tokenizer}")
     IGNORE_INDEX = LabelSmoother.ignore_index if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
 
-    raw_datasets = load_raw_datasets(data_args, model_args, coordinator)
-    if coordinator.is_master():
-        logger.info(f"Raw datasets: {raw_datasets}")
+
 
     # Preprocessing the datasets
     max_source_length = data_args.max_source_length
@@ -963,15 +965,21 @@ def main():
     train_dataset = None
     max_train_samples = 0
     if training_args.do_train:
-        if "train" not in raw_datasets:
-            raise ValueError("--do_train requires a train dataset")
-        train_dataset = raw_datasets['train']
-        if data_args.max_train_samples is not None and data_args.max_train_samples > 0:
-            max_train_samples = min(len(train_dataset), data_args.max_train_samples)
-            train_dataset = train_dataset.select(range(max_train_samples))
-        #         if coordinator.is_master():
-        #             logger.debug(f"Example train_dataset[0]: {train_dataset[0]}")
+
+        raw_datasets = load_raw_datasets(data_args, model_args, coordinator)
+        if coordinator.is_master():
+            logger.info(f"Raw datasets: {raw_datasets}")
+
+
         with training_args.main_process_first(desc="Train dataset tokenization"):
+            if "train" not in raw_datasets:
+                raise ValueError("--do_train requires a train dataset")
+            train_dataset = raw_datasets['train']
+            if data_args.max_train_samples is not None and data_args.max_train_samples > 0:
+                max_train_samples = min(len(train_dataset), data_args.max_train_samples)
+                train_dataset = train_dataset.select(range(max_train_samples))
+            #         if coordinator.is_master():
+            #             logger.debug(f"Example train_dataset[0]: {train_dataset[0]}")
             train_dataset = train_dataset.map(
                 preprocess_function,
                 batched=True,
@@ -988,17 +996,27 @@ def main():
                                                      num_proc=data_args.preprocessing_num_workers)
                 if coordinator.is_master():
                     logger.warning(f"Num train_samples after remove long sample: {len(train_dataset)}")
+                    
+            if coordinator.is_master():
+                logger.debug("Filter emtpy labels")
             train_dataset = train_dataset.filter(filter_empty_labels, num_proc=data_args.preprocessing_num_workers)
-            train_dataset = train_dataset.sort(column_names=["seq_length"], reverse=True, keep_in_memory=False)
 
-            replaced_labels = [label if label != IGNORE_INDEX else tokenizer.pad_token_id
-                               for label in list(train_dataset[0]['labels'])]
+            train_dataset.to_parquet(os.path.join(data_args.train_file_dir, "train_dataset.parquet"))
+
+            # train_dataset = load_dataset("parquet", data_files={"train": os.path.join(data_args.train_file_dir, "train_dataset.parquet")})['train']
+            # train_dataset = train_dataset.select([i for i in range(0, len(train_dataset), 100)])
+            
+#             if coordinator.is_master():
+#                 logger.debug("Sort seq length")
+#             train_dataset = train_dataset.sort(column_names=["seq_length"], reverse=True, keep_in_memory=False)
+
             max_train_samples = len(train_dataset)
             if coordinator.is_master():
                 logger.debug(f"Num train_samples: {max_train_samples}")
                 logger.debug(f"Tokenized training example: {tokenizer.decode(train_dataset[0]['input_ids'])}")
-
-    #                 logger.debug(f"Decode labels[0]: {tokenizer.decode(replaced_labels)}")
+                # replaced_labels = [label if label != IGNORE_INDEX else tokenizer.pad_token_id
+                #                for label in list(train_dataset[0]['labels'])]
+                # logger.debug(f"Decode labels[0]: {tokenizer.decode(replaced_labels)}")
 
     eval_dataset = None
     max_eval_samples = 0
@@ -1030,6 +1048,11 @@ def main():
                     logger.warning(f"Num eval_samples after remove long sample: {len(eval_dataset)}")
 
             eval_dataset = eval_dataset.filter(filter_empty_labels, num_proc=data_args.preprocessing_num_workers)
+
+            eval_dataset.to_parquet(os.path.join(data_args.train_file_dir, "eval_dataset.parquet"))
+
+            # eval_dataset = load_dataset("parquet", data_files={"validation": os.path.join(data_args.train_file_dir, "eval_dataset.parquet")})['validation']
+            # eval_dataset = eval_dataset.select([i for i in range(0, len(eval_dataset), 100)])
 
             max_eval_samples = len(eval_dataset)
             if coordinator.is_master():
@@ -1071,7 +1094,8 @@ def main():
                 ) if training_args.qlora else None,
             )
         except FileNotFoundError as ex:
-            logger.warning("Load model from safetensors failed, try to load pytorch binary")
+            if coordinator.is_master():
+                logger.warning("Load model from safetensors failed, try to load pytorch binary")
             model = model_class.from_pretrained(
                 model_args.model_name_or_path,
                 config=config,
@@ -1170,13 +1194,13 @@ def main():
         if coordinator.is_master():
             logger.info("*** Train ***")
         sample = next(iter(trainer.get_train_dataloader()))
-        replaced_labels = [label if label != IGNORE_INDEX else tokenizer.pad_token_id for label in sample['labels'][0]]
 
-        #         if coordinator.is_master():
-        #             logger.debug(f"Train dataloader example: {sample}")
-        #             logger.debug(f"Detail input_ids: {list(sample['input_ids'])[:3]}, \nlabels: {list(sample['labels'])[:3]}")
-        #             logger.debug(f"Decode input_ids[0]: {tokenizer.decode(sample['input_ids'][0])}")
-        #             logger.debug(f"Decode labels[0]: {tokenizer.decode(replaced_labels)}")
+        if coordinator.is_master():
+            logger.debug(f"Train dataloader example: {sample}")
+            logger.debug(f"Detail input_ids: {list(sample['input_ids'])[:3]}, \nlabels: {list(sample['labels'])[:3]}")
+            logger.debug(f"Decode input_ids[0]: {tokenizer.decode(sample['input_ids'][0])}")
+            replaced_labels = [label if label != IGNORE_INDEX else tokenizer.pad_token_id for label in sample['labels'][0]]
+            logger.debug(f"Decode labels[0]: {tokenizer.decode(replaced_labels)}")
         checkpoint = None
         if training_args.resume_from_checkpoint is not None:
             checkpoint = training_args.resume_from_checkpoint
