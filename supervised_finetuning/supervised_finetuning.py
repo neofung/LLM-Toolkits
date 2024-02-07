@@ -566,8 +566,8 @@ register_conv_template(
         system_prompt="",
         messages=[],
         roles=("user", "assistant"),
-        prompt="<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n",
-        sep="\n",
+        prompt="<|im_start|>{query}<|im_end|><|im_start|>",
+        sep="<|im_end|>\n",
         stop_str="<|im_end|>",
     )
 )
@@ -966,45 +966,45 @@ def main():
     max_train_samples = 0
     if training_args.do_train:
 
-        raw_datasets = load_raw_datasets(data_args, model_args, coordinator)
-        if coordinator.is_master():
-            logger.info(f"Raw datasets: {raw_datasets}")
+        # raw_datasets = load_raw_datasets(data_args, model_args, coordinator)
+        # if coordinator.is_master():
+        #     logger.info(f"Raw datasets: {raw_datasets}")
 
 
         with training_args.main_process_first(desc="Train dataset tokenization"):
-            if "train" not in raw_datasets:
-                raise ValueError("--do_train requires a train dataset")
-            train_dataset = raw_datasets['train']
-            if data_args.max_train_samples is not None and data_args.max_train_samples > 0:
-                max_train_samples = min(len(train_dataset), data_args.max_train_samples)
-                train_dataset = train_dataset.select(range(max_train_samples))
-            #         if coordinator.is_master():
-            #             logger.debug(f"Example train_dataset[0]: {train_dataset[0]}")
-            train_dataset = train_dataset.map(
-                preprocess_function,
-                batched=True,
-                num_proc=data_args.preprocessing_num_workers,
-                remove_columns=train_dataset.column_names,
-                load_from_cache_file=not data_args.overwrite_cache,
-                desc="Running tokenizer on dataset",
-            )
+            # if "train" not in raw_datasets:
+            #     raise ValueError("--do_train requires a train dataset")
+            # train_dataset = raw_datasets['train']
+            # if data_args.max_train_samples is not None and data_args.max_train_samples > 0:
+            #     max_train_samples = min(len(train_dataset), data_args.max_train_samples)
+            #     train_dataset = train_dataset.select(range(max_train_samples))
+            # #         if coordinator.is_master():
+            # #             logger.debug(f"Example train_dataset[0]: {train_dataset[0]}")
+            # train_dataset = train_dataset.map(
+            #     preprocess_function,
+            #     batched=True,
+            #     num_proc=data_args.preprocessing_num_workers,
+            #     remove_columns=train_dataset.column_names,
+            #     load_from_cache_file=not data_args.overwrite_cache,
+            #     desc="Running tokenizer on dataset",
+            # )
 
-            if data_args.drop_out_of_length_limit_sample:
-                if coordinator.is_master():
-                    logger.warning(f"Num train_samples before remove long sample: {len(train_dataset)}")
-                train_dataset = train_dataset.filter(drop_out_of_length_limit_sample,
-                                                     num_proc=data_args.preprocessing_num_workers)
-                if coordinator.is_master():
-                    logger.warning(f"Num train_samples after remove long sample: {len(train_dataset)}")
+            # if data_args.drop_out_of_length_limit_sample:
+            #     if coordinator.is_master():
+            #         logger.warning(f"Num train_samples before remove long sample: {len(train_dataset)}")
+            #     train_dataset = train_dataset.filter(drop_out_of_length_limit_sample,
+            #                                          num_proc=data_args.preprocessing_num_workers)
+            #     if coordinator.is_master():
+            #         logger.warning(f"Num train_samples after remove long sample: {len(train_dataset)}")
                     
-            if coordinator.is_master():
-                logger.debug("Filter emtpy labels")
-            train_dataset = train_dataset.filter(filter_empty_labels, num_proc=data_args.preprocessing_num_workers)
+            # if coordinator.is_master():
+            #     logger.debug("Filter emtpy labels")
+            # train_dataset = train_dataset.filter(filter_empty_labels, num_proc=data_args.preprocessing_num_workers)
 
-            train_dataset.to_parquet(os.path.join(data_args.train_file_dir, "train_dataset.parquet"))
+            # train_dataset.to_parquet(os.path.join(data_args.train_file_dir, "train_dataset.parquet"))
 
-            # train_dataset = load_dataset("parquet", data_files={"train": os.path.join(data_args.train_file_dir, "train_dataset.parquet")})['train']
-            # train_dataset = train_dataset.select([i for i in range(0, len(train_dataset), 100)])
+            train_dataset = load_dataset("parquet", data_files={"train": os.path.join(data_args.train_file_dir, "train_dataset.parquet")})['train']
+            # train_dataset = train_dataset.select([i for i in range(0, len(train_dataset), 10)])
             
 #             if coordinator.is_master():
 #                 logger.debug("Sort seq length")
@@ -1022,37 +1022,37 @@ def main():
     max_eval_samples = 0
     if training_args.do_eval:
         with training_args.main_process_first(desc="Eval dataset tokenization"):
-            if "validation" not in raw_datasets:
-                raise ValueError("--do_eval requires a validation dataset")
-            eval_dataset = raw_datasets["validation"]
-            if data_args.max_eval_samples is not None and data_args.max_eval_samples > 0:
-                max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
-                eval_dataset = eval_dataset.select(range(max_eval_samples))
-            #             if coordinator.is_master():
-            #                 logger.debug(f"Example eval_dataset[0]: {eval_dataset[0]}")
-            eval_dataset = eval_dataset.map(
-                preprocess_function,
-                batched=True,
-                num_proc=data_args.preprocessing_num_workers,
-                remove_columns=eval_dataset.column_names,
-                load_from_cache_file=not data_args.overwrite_cache,
-                desc="Running tokenizer on dataset",
-            )
+            # if "validation" not in raw_datasets:
+            #     raise ValueError("--do_eval requires a validation dataset")
+            # eval_dataset = raw_datasets["validation"]
+            # if data_args.max_eval_samples is not None and data_args.max_eval_samples > 0:
+            #     max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
+            #     eval_dataset = eval_dataset.select(range(max_eval_samples))
+            # #             if coordinator.is_master():
+            # #                 logger.debug(f"Example eval_dataset[0]: {eval_dataset[0]}")
+            # eval_dataset = eval_dataset.map(
+            #     preprocess_function,
+            #     batched=True,
+            #     num_proc=data_args.preprocessing_num_workers,
+            #     remove_columns=eval_dataset.column_names,
+            #     load_from_cache_file=not data_args.overwrite_cache,
+            #     desc="Running tokenizer on dataset",
+            # )
 
-            if data_args.drop_out_of_length_limit_sample:
-                if coordinator.is_master():
-                    logger.warning(f"Num eval_samples before remove long sample: {len(eval_dataset)}")
-                eval_dataset = eval_dataset.filter(drop_out_of_length_limit_sample,
-                                                   num_proc=data_args.preprocessing_num_workers)
-                if coordinator.is_master():
-                    logger.warning(f"Num eval_samples after remove long sample: {len(eval_dataset)}")
+            # if data_args.drop_out_of_length_limit_sample:
+            #     if coordinator.is_master():
+            #         logger.warning(f"Num eval_samples before remove long sample: {len(eval_dataset)}")
+            #     eval_dataset = eval_dataset.filter(drop_out_of_length_limit_sample,
+            #                                        num_proc=data_args.preprocessing_num_workers)
+            #     if coordinator.is_master():
+            #         logger.warning(f"Num eval_samples after remove long sample: {len(eval_dataset)}")
 
-            eval_dataset = eval_dataset.filter(filter_empty_labels, num_proc=data_args.preprocessing_num_workers)
+            # eval_dataset = eval_dataset.filter(filter_empty_labels, num_proc=data_args.preprocessing_num_workers)
 
-            eval_dataset.to_parquet(os.path.join(data_args.train_file_dir, "eval_dataset.parquet"))
+            # eval_dataset.to_parquet(os.path.join(data_args.train_file_dir, "eval_dataset.parquet"))
 
-            # eval_dataset = load_dataset("parquet", data_files={"validation": os.path.join(data_args.train_file_dir, "eval_dataset.parquet")})['validation']
-            # eval_dataset = eval_dataset.select([i for i in range(0, len(eval_dataset), 100)])
+            eval_dataset = load_dataset("parquet", data_files={"validation": os.path.join(data_args.train_file_dir, "eval_dataset.parquet")})['validation']
+            eval_dataset = eval_dataset.select([i for i in range(0, len(eval_dataset), 100)])
 
             max_eval_samples = len(eval_dataset)
             if coordinator.is_master():
